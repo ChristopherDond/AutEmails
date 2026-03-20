@@ -4,7 +4,6 @@ Schedule and automate email sending with cron-like scheduling.
 """
 import logging
 import threading
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
@@ -156,6 +155,8 @@ class EmailScheduler:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._email_sender = EmailSender()
+        self._lock = threading.RLock()
+        self._wakeup = threading.Event()
     
     def add_scheduled_email(
         self,
@@ -202,32 +203,42 @@ class EmailScheduler:
         )
         
         scheduled_email.next_run = CronParser.next_run(schedule)
-        
-        self._scheduled_emails[name] = scheduled_email
-        logger.info(f"Added scheduled email: {name}, next run: {scheduled_email.next_run}")
+
+        with self._lock:
+            self._scheduled_emails[name] = scheduled_email
+        self._wakeup.set()
+        logger.info("Added scheduled email: %s, next run: %s", name, scheduled_email.next_run)
         return scheduled_email
     
     def remove_scheduled_email(self, name: str) -> bool:
         """Remove a scheduled email."""
-        if name in self._scheduled_emails:
-            del self._scheduled_emails[name]
-            logger.info(f"Removed scheduled email: {name}")
+        with self._lock:
+            removed = self._scheduled_emails.pop(name, None)
+        if removed is not None:
+            self._wakeup.set()
+            logger.info("Removed scheduled email: %s", name)
             return True
         return False
     
     def enable(self, name: str) -> bool:
         """Enable a scheduled email."""
-        if name in self._scheduled_emails:
-            self._scheduled_emails[name].enabled = True
-            return True
-        return False
+        with self._lock:
+            scheduled = self._scheduled_emails.get(name)
+            if scheduled is None:
+                return False
+            scheduled.enabled = True
+        self._wakeup.set()
+        return True
     
     def disable(self, name: str) -> bool:
         """Disable a scheduled email."""
-        if name in self._scheduled_emails:
-            self._scheduled_emails[name].enabled = False
-            return True
-        return False
+        with self._lock:
+            scheduled = self._scheduled_emails.get(name)
+            if scheduled is None:
+                return False
+            scheduled.enabled = False
+        self._wakeup.set()
+        return True
     
     def _execute_scheduled_email(self, scheduled_email: ScheduledEmail) -> bool:
         """Execute a scheduled email."""
@@ -245,35 +256,56 @@ class EmailScheduler:
                 html=scheduled_email.html,
                 attachments=attachments,
             )
-            
+
             if success:
-                scheduled_email.last_run = datetime.now()
-                scheduled_email.run_count += 1
-                scheduled_email.next_run = CronParser.next_run(
-                    scheduled_email.schedule,
-                    scheduled_email.last_run
-                )
-                logger.info(f"Executed scheduled email: {scheduled_email.name}")
-            
+                run_time = datetime.now()
+                next_run = CronParser.next_run(scheduled_email.schedule, run_time)
+                with self._lock:
+                    scheduled_email.last_run = run_time
+                    scheduled_email.run_count += 1
+                    scheduled_email.next_run = next_run
+                self._wakeup.set()
+                logger.info("Executed scheduled email: %s", scheduled_email.name)
+
             return success
-            
-        except Exception as e:
-            logger.error(f"Error executing {scheduled_email.name}: {e}")
+
+        except Exception:
+            logger.error("Error executing %s", scheduled_email.name, exc_info=True)
             return False
     
     def _scheduler_loop(self):
         """Main scheduler loop."""
         while self._running:
             now = datetime.now()
-            
-            for name, scheduled_email in self._scheduled_emails.items():
-                if not scheduled_email.enabled:
-                    continue
-                
-                if scheduled_email.next_run and now >= scheduled_email.next_run:
-                    self._execute_scheduled_email(scheduled_email)
-            
-            time.sleep(30)
+
+            due: List[ScheduledEmail] = []
+            soonest_next: Optional[datetime] = None
+
+            with self._lock:
+                for scheduled_email in self._scheduled_emails.values():
+                    if not scheduled_email.enabled or not scheduled_email.next_run:
+                        continue
+
+                    if now >= scheduled_email.next_run:
+                        due.append(scheduled_email)
+                        continue
+
+                    if soonest_next is None or scheduled_email.next_run < soonest_next:
+                        soonest_next = scheduled_email.next_run
+
+            for scheduled_email in due:
+                self._execute_scheduled_email(scheduled_email)
+
+            if not self._running:
+                break
+
+            timeout = 30.0
+            if soonest_next is not None:
+                delta = (soonest_next - datetime.now()).total_seconds()
+                timeout = 1.0 if delta <= 0 else min(300.0, max(1.0, delta))
+
+            self._wakeup.wait(timeout=timeout)
+            self._wakeup.clear()
     
     def start(self):
         """Start the scheduler."""
@@ -282,6 +314,7 @@ class EmailScheduler:
             return
 
         self._running = True
+        self._wakeup.clear()
         if not self._email_sender.connect():
             logger.warning("Could not connect to SMTP on scheduler start")
         self._thread = threading.Thread(target=self._scheduler_loop, daemon=True)
@@ -291,6 +324,7 @@ class EmailScheduler:
     def stop(self):
         """Stop the scheduler."""
         self._running = False
+        self._wakeup.set()
         if self._thread:
             self._thread.join(timeout=5)
         self._email_sender.disconnect()
@@ -298,12 +332,17 @@ class EmailScheduler:
     
     def run_now(self, name: str) -> bool:
         """Execute a scheduled email immediately."""
-        if name in self._scheduled_emails:
-            return self._execute_scheduled_email(self._scheduled_emails[name])
-        return False
+        with self._lock:
+            scheduled = self._scheduled_emails.get(name)
+        if scheduled is None:
+            return False
+        return self._execute_scheduled_email(scheduled)
     
     def get_status(self) -> Dict[str, Any]:
         """Get scheduler status."""
+        with self._lock:
+            scheduled_snapshot = dict(self._scheduled_emails)
+
         return {
             "running": self._running,
             "scheduled_emails": {
@@ -313,13 +352,14 @@ class EmailScheduler:
                     "next_run": se.next_run.isoformat() if se.next_run else None,
                     "run_count": se.run_count,
                 }
-                for name, se in self._scheduled_emails.items()
-            }
+                for name, se in scheduled_snapshot.items()
+            },
         }
     
     def list_scheduled(self) -> List[str]:
         """List all scheduled email names."""
-        return list(self._scheduled_emails.keys())
+        with self._lock:
+            return list(self._scheduled_emails.keys())
 
 
 _scheduler: Optional[EmailScheduler] = None

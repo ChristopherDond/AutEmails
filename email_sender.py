@@ -48,7 +48,22 @@ class EmailSender:
         self.use_tls = use_tls if use_tls is not None else SMTP_CONFIG["use_tls"]
         self.timeout = SMTP_CONFIG.get("timeout", 30) if timeout is None else timeout
         self._connection: Optional[smtplib.SMTP] = None
-    
+
+    @staticmethod
+    def _normalize_addresses(value: Optional[Union[str, List[str]]]) -> List[str]:
+        if not value:
+            return []
+        items = [value] if isinstance(value, str) else list(value)
+        cleaned: List[str] = []
+        seen: set[str] = set()
+        for item in items:
+            addr = str(item).strip()
+            if not addr or addr in seen:
+                continue
+            seen.add(addr)
+            cleaned.append(addr)
+        return cleaned
+
     def connect(self) -> bool:
         """Establish connection to SMTP server."""
         try:
@@ -63,10 +78,10 @@ class EmailSender:
                 self._connection.ehlo()
             if self.username and self.password:
                 self._connection.login(self.username, self.password)
-            logger.info(f"Connected to SMTP server: {self.smtp_server}")
+            logger.info("Connected to SMTP server: %s", self.smtp_server)
             return True
-        except Exception as e:
-            logger.error(f"Failed to connect to SMTP server: {e}")
+        except Exception:
+            logger.error("Failed to connect to SMTP server", exc_info=True)
             self._connection = None
             return False
     
@@ -76,8 +91,8 @@ class EmailSender:
             try:
                 self._connection.quit()
                 logger.info("Disconnected from SMTP server")
-            except Exception as e:
-                logger.warning(f"Error disconnecting: {e}")
+            except Exception:
+                logger.warning("Error disconnecting", exc_info=True)
             finally:
                 self._connection = None
     
@@ -109,13 +124,21 @@ class EmailSender:
             bool: True if email sent successfully, False otherwise
         """
         try:
+            to_list = self._normalize_addresses(to)
+            cc_list = self._normalize_addresses(cc)
+            bcc_list = self._normalize_addresses(bcc)
+
+            if not to_list:
+                logger.error("No recipients provided (to=empty)")
+                return False
+
             msg = MIMEMultipart()
             msg["From"] = from_addr or DEFAULT_SENDER
-            msg["To"] = to if isinstance(to, str) else ", ".join(to)
+            msg["To"] = ", ".join(to_list)
             msg["Subject"] = subject
 
-            if cc:
-                msg["Cc"] = cc if isinstance(cc, str) else ", ".join(cc)
+            if cc_list:
+                msg["Cc"] = ", ".join(cc_list)
 
             content_type = "html" if html else "plain"
             msg.attach(MIMEText(body, content_type))
@@ -124,11 +147,7 @@ class EmailSender:
                 for file_path in attachments:
                     self._attach_file(msg, str(file_path))
 
-            recipients: List[str] = [to] if isinstance(to, str) else list(to)
-            if cc:
-                recipients.extend([cc] if isinstance(cc, str) else list(cc))
-            if bcc:
-                recipients.extend([bcc] if isinstance(bcc, str) else list(bcc))
+            recipients: List[str] = [*to_list, *cc_list, *bcc_list]
 
             if not self._connection and not self.connect():
                 return False
@@ -136,18 +155,18 @@ class EmailSender:
                 return False
 
             self._connection.sendmail(msg["From"], recipients, msg.as_string())
-            logger.info(f"Email sent successfully to: {to}")
+            logger.info("Email sent successfully to: %s", msg["To"])
             return True
 
-        except Exception as e:
-            logger.error(f"Failed to send email: {e}")
+        except Exception:
+            logger.error("Failed to send email", exc_info=True)
             return False
     
     def _attach_file(self, msg: MIMEMultipart, file_path: str):
         """Attach a file to the email message."""
         path = Path(file_path)
         if not path.exists():
-            logger.warning(f"Attachment not found: {file_path}")
+            logger.warning("Attachment not found: %s", file_path)
             return
         
         with open(path, "rb") as f:
@@ -160,7 +179,7 @@ class EmailSender:
             f"attachment; filename={path.name}"
         )
         msg.attach(part)
-        logger.debug(f"Attached file: {path.name}")
+        logger.debug("Attached file: %s", path.name)
     
     def __enter__(self):
         """Context manager entry."""

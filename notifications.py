@@ -185,15 +185,17 @@ class NotificationManager:
                 if success:
                     notification.sent = True
                     notification.sent_at = datetime.now()
-                    logger.info(f"Notification sent: {notification.title}")
+                    logger.info("Notification sent: %s", notification.title)
                     return True
-                    
-            except Exception as e:
-                logger.warning(f"Attempt {attempt + 1} failed: {e}")
+
+            except Exception:
+                logger.warning("Attempt %s failed", attempt + 1, exc_info=True)
                 if attempt < self.max_retries - 1:
                     time.sleep(self.retry_delay)
-        
-        logger.error(f"Failed to send notification after {self.max_retries} attempts")
+
+        logger.error(
+            "Failed to send notification after %s attempts", self.max_retries
+        )
         return False
     
     def send_immediate(
