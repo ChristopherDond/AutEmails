@@ -10,13 +10,9 @@ import json
 import csv
 import io
 
-from email_sender import EmailSender, send_quick_email
-from config import REPORT_CONFIG, LOG_CONFIG
+from email_sender import send_quick_email
+from config import REPORT_CONFIG
 
-logging.basicConfig(
-    level=getattr(logging, LOG_CONFIG["level"]),
-    format=LOG_CONFIG["format"]
-)
 logger = logging.getLogger(__name__)
 
 
@@ -60,8 +56,15 @@ class ReportGenerator:
         if template:
             return template.format(title=title, data=data)
         
-        # Default HTML template
-        html = f"""
+        header_cells = "".join(f"<th>{col}</th>" for col in (columns or []))
+        rows: List[str] = []
+        for row in data:
+            row_cells = "".join(f"<td>{row.get(col, '')}</td>" for col in (columns or []))
+            rows.append(f"<tr>{row_cells}</tr>")
+        body_rows = "\n".join(rows)
+
+        generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return f"""
 <!DOCTYPE html>
 <html>
 <head>
@@ -82,25 +85,17 @@ class ReportGenerator:
     <table>
         <thead>
             <tr>
-                {"".join(f"<th>{col}</th>" for col in (columns or []))}
+                {header_cells}
             </tr>
         </thead>
         <tbody>
-"""
-        for row in data:
-            html += "            <tr>\n"
-            for col in (columns or []):
-                html += f"                <td>{row.get(col, '')}</td>\n"
-            html += "            </tr>\n"
-        
-        html += f"""
+            {body_rows}
         </tbody>
     </table>
-    <p class="timestamp">Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+    <p class="timestamp">Generated on: {generated_at}</p>
 </body>
 </html>
 """
-        return html
     
     def generate_csv_report(
         self,
@@ -189,7 +184,6 @@ class ReportGenerator:
         Returns:
             bool: True if sent successfully
         """
-        # Generate report
         if format == "html":
             content = self.generate_html_report(title, data)
         elif format == "csv":
@@ -199,12 +193,10 @@ class ReportGenerator:
         else:
             raise ValueError(f"Unsupported format: {format}")
         
-        # Save local copy
         attachment_path = None
         if save_copy:
             attachment_path = self.save_report(content, title.replace(" ", "_"), format)
         
-        # Prepare email
         if format == "html":
             body = email_body or content
             is_html = True
@@ -212,7 +204,6 @@ class ReportGenerator:
             body = email_body or f"Please find the attached {title} report."
             is_html = False
         
-        # Send email
         attachments = [str(attachment_path)] if attachment_path and format != "html" else None
         
         return send_quick_email(
@@ -234,7 +225,7 @@ class ScheduledReport:
         name: str,
         data_source: Callable[[], List[Dict[str, Any]]],
         recipients: List[str],
-        schedule: str,  # cron-like expression
+        schedule: str,
         format: str = "html"
     ):
         self.name = name
@@ -269,7 +260,6 @@ def send_report(
 
 
 if __name__ == "__main__":
-    # Example usage
     sample_data = [
         {"Name": "John Doe", "Email": "john@example.com", "Status": "Active"},
         {"Name": "Jane Smith", "Email": "jane@example.com", "Status": "Pending"},

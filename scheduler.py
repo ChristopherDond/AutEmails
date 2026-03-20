@@ -5,21 +5,15 @@ Schedule and automate email sending with cron-like scheduling.
 import logging
 import threading
 import time
-from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Any, Callable, Union
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import Enum
-import re
+from functools import lru_cache
+from typing import Any, Callable, Dict, List, Optional, Union
 
-from email_sender import EmailSender, send_quick_email
+from email_sender import EmailSender
 from reports import ReportGenerator
-from notifications import send_notification
-from config import SCHEDULER_CONFIG, LOG_CONFIG
 
-logging.basicConfig(
-    level=getattr(logging, LOG_CONFIG["level"]),
-    format=LOG_CONFIG["format"]
-)
 logger = logging.getLogger(__name__)
 
 
@@ -41,7 +35,7 @@ class ScheduledEmail:
     recipients: List[str]
     subject: str
     body_generator: Callable[[], str]
-    schedule: str  # Cron expression or interval
+    schedule: str
     enabled: bool = True
     html: bool = False
     attachments_generator: Optional[Callable[[], List[str]]] = None
@@ -59,26 +53,26 @@ class CronParser:
     """
     
     @staticmethod
-    def parse_field(field: str, min_val: int, max_val: int) -> List[int]:
-        """Parse a single cron field."""
+    def parse_field(field: str, min_val: int, max_val: int) -> frozenset[int]:
         if field == "*":
-            return list(range(min_val, max_val + 1))
-        
+            return frozenset(range(min_val, max_val + 1))
+
         if field.startswith("*/"):
             step = int(field[2:])
-            return list(range(min_val, max_val + 1, step))
-        
+            return frozenset(range(min_val, max_val + 1, step))
+
         if "-" in field:
             start, end = map(int, field.split("-"))
-            return list(range(start, end + 1))
-        
+            return frozenset(range(start, end + 1))
+
         if "," in field:
-            return [int(x) for x in field.split(",")]
-        
-        return [int(field)]
+            return frozenset(int(x) for x in field.split(","))
+
+        return frozenset({int(field)})
     
     @staticmethod
-    def parse(expression: str) -> Dict[str, List[int]]:
+    @lru_cache(maxsize=256)
+    def parse(expression: str) -> Dict[str, frozenset[int]]:
         """
         Parse a cron expression.
         
@@ -92,17 +86,23 @@ class CronParser:
         if len(parts) != 5:
             raise ValueError(f"Invalid cron expression: {expression}")
         
+        minutes = CronParser.parse_field(parts[0], 0, 59)
+        hours = CronParser.parse_field(parts[1], 0, 23)
+        days = CronParser.parse_field(parts[2], 1, 31)
+        months = CronParser.parse_field(parts[3], 1, 12)
+        raw_weekdays = CronParser.parse_field(parts[4], 0, 7)
+        weekdays = frozenset(d % 7 for d in raw_weekdays)
+
         return {
-            "minutes": CronParser.parse_field(parts[0], 0, 59),
-            "hours": CronParser.parse_field(parts[1], 0, 23),
-            "days": CronParser.parse_field(parts[2], 1, 31),
-            "months": CronParser.parse_field(parts[3], 1, 12),
-            "weekdays": CronParser.parse_field(parts[4], 0, 6),  # 0 = Sunday
+            "minutes": minutes,
+            "hours": hours,
+            "days": days,
+            "months": months,
+            "weekdays": weekdays,
         }
     
     @staticmethod
     def matches(expression: str, dt: datetime) -> bool:
-        """Check if a datetime matches a cron expression."""
         try:
             parsed = CronParser.parse(expression)
             return (
@@ -110,26 +110,30 @@ class CronParser:
                 and dt.hour in parsed["hours"]
                 and dt.day in parsed["days"]
                 and dt.month in parsed["months"]
-                and dt.weekday() in [d % 7 for d in parsed["weekdays"]]
+                and dt.weekday() in parsed["weekdays"]
             )
         except Exception:
             return False
     
     @staticmethod
     def next_run(expression: str, after: Optional[datetime] = None) -> datetime:
-        """Calculate the next run time for a cron expression."""
         if after is None:
             after = datetime.now()
-        
-        # Start from next minute
+
+        parsed = CronParser.parse(expression)
         current = after.replace(second=0, microsecond=0) + timedelta(minutes=1)
-        
-        # Search for next match (limit to prevent infinite loop)
-        for _ in range(525600):  # Max 1 year of minutes
-            if CronParser.matches(expression, current):
+
+        for _ in range(525600):
+            if (
+                current.minute in parsed["minutes"]
+                and current.hour in parsed["hours"]
+                and current.day in parsed["days"]
+                and current.month in parsed["months"]
+                and current.weekday() in parsed["weekdays"]
+            ):
                 return current
             current += timedelta(minutes=1)
-        
+
         raise ValueError(f"Could not find next run time for: {expression}")
 
 
@@ -141,9 +145,9 @@ class EmailScheduler:
     INTERVAL_CRON = {
         ScheduleInterval.MINUTELY: "* * * * *",
         ScheduleInterval.HOURLY: "0 * * * *",
-        ScheduleInterval.DAILY: "0 9 * * *",  # 9 AM
-        ScheduleInterval.WEEKLY: "0 9 * * 1",  # Monday 9 AM
-        ScheduleInterval.MONTHLY: "0 9 1 * *",  # 1st of month 9 AM
+        ScheduleInterval.DAILY: "0 9 * * *",
+        ScheduleInterval.WEEKLY: "0 9 * * 1",
+        ScheduleInterval.MONTHLY: "0 9 1 * *",
     }
     
     def __init__(self):
@@ -197,7 +201,6 @@ class EmailScheduler:
             metadata=metadata
         )
         
-        # Calculate next run
         scheduled_email.next_run = CronParser.next_run(schedule)
         
         self._scheduled_emails[name] = scheduled_email
@@ -229,21 +232,18 @@ class EmailScheduler:
     def _execute_scheduled_email(self, scheduled_email: ScheduledEmail) -> bool:
         """Execute a scheduled email."""
         try:
-            # Generate body
             body = scheduled_email.body_generator()
-            
-            # Generate attachments
+
             attachments = None
             if scheduled_email.attachments_generator:
                 attachments = scheduled_email.attachments_generator()
-            
-            # Send email
-            success = send_quick_email(
+
+            success = self._email_sender.send_email(
                 to=scheduled_email.recipients,
                 subject=scheduled_email.subject,
                 body=body,
                 html=scheduled_email.html,
-                attachments=attachments
+                attachments=attachments,
             )
             
             if success:
@@ -273,7 +273,6 @@ class EmailScheduler:
                 if scheduled_email.next_run and now >= scheduled_email.next_run:
                     self._execute_scheduled_email(scheduled_email)
             
-            # Sleep for 30 seconds between checks
             time.sleep(30)
     
     def start(self):
@@ -281,8 +280,10 @@ class EmailScheduler:
         if self._running:
             logger.warning("Scheduler is already running")
             return
-        
+
         self._running = True
+        if not self._email_sender.connect():
+            logger.warning("Could not connect to SMTP on scheduler start")
         self._thread = threading.Thread(target=self._scheduler_loop, daemon=True)
         self._thread.start()
         logger.info("Email scheduler started")
@@ -292,6 +293,7 @@ class EmailScheduler:
         self._running = False
         if self._thread:
             self._thread.join(timeout=5)
+        self._email_sender.disconnect()
         logger.info("Email scheduler stopped")
     
     def run_now(self, name: str) -> bool:
@@ -320,7 +322,6 @@ class EmailScheduler:
         return list(self._scheduled_emails.keys())
 
 
-# Global scheduler instance
 _scheduler: Optional[EmailScheduler] = None
 
 
@@ -397,13 +398,11 @@ def schedule_daily_report(
 
 
 if __name__ == "__main__":
-    # Example usage
     print("Email Scheduler Module")
     print("=" * 50)
     
     scheduler = EmailScheduler()
     
-    # Add a test scheduled email
     scheduler.add_scheduled_email(
         name="daily_summary",
         recipients=["test@example.com"],

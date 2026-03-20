@@ -4,7 +4,7 @@ A comprehensive email automation system for sending reports, notifications, and 
 """
 import argparse
 import logging
-from typing import List, Dict, Any
+import os
 
 from email_sender import EmailSender, send_quick_email
 from reports import ReportGenerator, send_report
@@ -26,16 +26,19 @@ from scheduler import (
 )
 from config import LOG_CONFIG
 
-# Setup logging
+_log_file = LOG_CONFIG.get("file")
+handlers = [logging.StreamHandler()]
+if _log_file:
+    _log_dir = os.path.dirname(_log_file)
+    if _log_dir:
+        os.makedirs(_log_dir, exist_ok=True)
+    handlers.append(logging.FileHandler(_log_file, encoding="utf-8"))
+
 logging.basicConfig(
     level=getattr(logging, LOG_CONFIG["level"]),
     format=LOG_CONFIG["format"],
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(LOG_CONFIG["file"], encoding="utf-8")
-    ]
+    handlers=handlers,
 )
-logger = logging.getLogger(__name__)
 
 
 def demo_send_email():
@@ -43,7 +46,6 @@ def demo_send_email():
     print("\n📧 Demo: Sending Simple Email")
     print("-" * 40)
     
-    # Using context manager
     with EmailSender() as sender:
         success = sender.send_email(
             to="recipient@example.com",
@@ -58,7 +60,6 @@ def demo_send_report():
     print("\n📊 Demo: Sending Report")
     print("-" * 40)
     
-    # Sample data
     data = [
         {"ID": 1, "Product": "Widget A", "Sales": 150, "Revenue": "$1,500"},
         {"ID": 2, "Product": "Widget B", "Sales": 230, "Revenue": "$2,300"},
@@ -68,11 +69,9 @@ def demo_send_report():
     
     generator = ReportGenerator()
     
-    # Generate HTML report
     html_report = generator.generate_html_report("Sales Report", data)
     print(f"Generated HTML report ({len(html_report)} characters)")
     
-    # Save report
     saved_path = generator.save_report(html_report, "sales_report", "html")
     print(f"Saved to: {saved_path}")
 
@@ -84,7 +83,6 @@ def demo_send_notification():
     
     manager = NotificationManager()
     
-    # Create notification
     notification = manager.create_notification(
         title="System Update Available",
         message="A new system update is available for your server.\nPlease review and apply at your earliest convenience.",
@@ -107,7 +105,6 @@ def demo_scheduler():
     
     scheduler = get_scheduler()
     
-    # Schedule a daily email
     scheduled = schedule_email(
         name="daily_greeting",
         recipients=["team@example.com"],
@@ -119,7 +116,6 @@ def demo_scheduler():
     print(f"Scheduled email: {scheduled.name}")
     print(f"Next run: {scheduled.next_run}")
     
-    # Schedule a daily report
     def get_daily_data():
         return [
             {"Metric": "Active Users", "Value": 1250},
@@ -138,7 +134,6 @@ def demo_scheduler():
     print(f"Scheduled report: {report.name}")
     print(f"Next run: {report.next_run}")
     
-    # Show status
     print("\nScheduler Status:")
     status = scheduler.get_status()
     for name, info in status["scheduled_emails"].items():
@@ -153,18 +148,16 @@ def run_scheduler_service():
     
     scheduler = get_scheduler()
     
-    # Example: Add some scheduled emails
     scheduler.add_scheduled_email(
         name="heartbeat",
         recipients=["admin@example.com"],
         subject="System Heartbeat",
-        body_generator=lambda: f"System is running normally.",
-        schedule="*/5 * * * *"  # Every 5 minutes
+        body_generator=lambda: "System is running normally.",
+        schedule="*/5 * * * *"
     )
     
     try:
         scheduler.start()
-        # Keep running
         while True:
             import time
             time.sleep(60)

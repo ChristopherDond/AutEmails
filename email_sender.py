@@ -2,22 +2,18 @@
 Core Email Sender Module
 Handles SMTP connection and email sending functionality.
 """
-import smtplib
 import logging
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
+import smtplib
+import ssl
 from email import encoders
-from typing import List, Optional, Union
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
+from typing import List, Optional, Union
 
-from config import SMTP_CONFIG, DEFAULT_SENDER, LOG_CONFIG
+from config import DEFAULT_SENDER, SMTP_CONFIG
 
-# Setup logging
-logging.basicConfig(
-    level=getattr(logging, LOG_CONFIG["level"]),
-    format=LOG_CONFIG["format"]
-)
 logger = logging.getLogger(__name__)
 
 
@@ -32,7 +28,8 @@ class EmailSender:
         smtp_port: Optional[int] = None,
         username: Optional[str] = None,
         password: Optional[str] = None,
-        use_tls: bool = True
+        use_tls: bool = True,
+        timeout: Optional[float] = None,
     ):
         """
         Initialize EmailSender with SMTP configuration.
@@ -49,25 +46,28 @@ class EmailSender:
         self.username = username or SMTP_CONFIG["username"]
         self.password = password or SMTP_CONFIG["password"]
         self.use_tls = use_tls if use_tls is not None else SMTP_CONFIG["use_tls"]
-        self._connection = None
+        self.timeout = SMTP_CONFIG.get("timeout", 30) if timeout is None else timeout
+        self._connection: Optional[smtplib.SMTP] = None
     
     def connect(self) -> bool:
-        """
-        Establish connection to SMTP server.
-        
-        Returns:
-            bool: True if connection successful, False otherwise
-        """
+        """Establish connection to SMTP server."""
         try:
-            self._connection = smtplib.SMTP(self.smtp_server, self.smtp_port)
+            self._connection = smtplib.SMTP(
+                self.smtp_server,
+                self.smtp_port,
+                timeout=self.timeout,
+            )
+            self._connection.ehlo()
             if self.use_tls:
-                self._connection.starttls()
+                self._connection.starttls(context=ssl.create_default_context())
+                self._connection.ehlo()
             if self.username and self.password:
                 self._connection.login(self.username, self.password)
             logger.info(f"Connected to SMTP server: {self.smtp_server}")
             return True
         except Exception as e:
             logger.error(f"Failed to connect to SMTP server: {e}")
+            self._connection = None
             return False
     
     def disconnect(self):
@@ -109,39 +109,36 @@ class EmailSender:
             bool: True if email sent successfully, False otherwise
         """
         try:
-            # Create message
             msg = MIMEMultipart()
             msg["From"] = from_addr or DEFAULT_SENDER
             msg["To"] = to if isinstance(to, str) else ", ".join(to)
             msg["Subject"] = subject
-            
+
             if cc:
                 msg["Cc"] = cc if isinstance(cc, str) else ", ".join(cc)
-            
-            # Attach body
+
             content_type = "html" if html else "plain"
             msg.attach(MIMEText(body, content_type))
-            
-            # Attach files
+
             if attachments:
                 for file_path in attachments:
-                    self._attach_file(msg, file_path)
-            
-            # Prepare recipients list
-            recipients = [to] if isinstance(to, str) else list(to)
+                    self._attach_file(msg, str(file_path))
+
+            recipients: List[str] = [to] if isinstance(to, str) else list(to)
             if cc:
-                recipients.extend([cc] if isinstance(cc, str) else cc)
+                recipients.extend([cc] if isinstance(cc, str) else list(cc))
             if bcc:
-                recipients.extend([bcc] if isinstance(bcc, str) else bcc)
-            
-            # Connect and send
+                recipients.extend([bcc] if isinstance(bcc, str) else list(bcc))
+
+            if not self._connection and not self.connect():
+                return False
             if not self._connection:
-                self.connect()
-            
+                return False
+
             self._connection.sendmail(msg["From"], recipients, msg.as_string())
             logger.info(f"Email sent successfully to: {to}")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to send email: {e}")
             return False
@@ -198,6 +195,5 @@ def send_quick_email(
 
 
 if __name__ == "__main__":
-    # Example usage
     print("Email Sender Module")
     print("Use EmailSender class or send_quick_email function to send emails.")

@@ -9,13 +9,9 @@ from enum import Enum
 from dataclasses import dataclass, field
 import time
 
-from email_sender import EmailSender, send_quick_email
-from config import NOTIFICATION_CONFIG, LOG_CONFIG
+from email_sender import send_quick_email
+from config import NOTIFICATION_CONFIG
 
-logging.basicConfig(
-    level=getattr(logging, LOG_CONFIG["level"]),
-    format=LOG_CONFIG["format"]
-)
 logger = logging.getLogger(__name__)
 
 
@@ -124,10 +120,11 @@ class NotificationManager:
         
         metadata_html = ""
         if notification.metadata:
-            metadata_html = "<hr><h4>Details:</h4><ul>"
-            for key, value in notification.metadata.items():
-                metadata_html += f"<li><strong>{key}:</strong> {value}</li>"
-            metadata_html += "</ul>"
+            items = "".join(
+                f"<li><strong>{key}:</strong> {value}</li>"
+                for key, value in notification.metadata.items()
+            )
+            metadata_html = f"<hr><h4>Details:</h4><ul>{items}</ul>"
         
         return f"""
 <!DOCTYPE html>
@@ -242,7 +239,6 @@ class NotificationManager:
         return self._notification_history.copy()
 
 
-# Convenience functions
 def send_notification(
     title: str,
     message: str,
@@ -328,7 +324,6 @@ def send_success_notification(
 
 
 if __name__ == "__main__":
-    # Example usage
     print("Notification System Module")
     print("=" * 50)
     
