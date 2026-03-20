@@ -1,0 +1,203 @@
+"""
+Core Email Sender Module
+Handles SMTP connection and email sending functionality.
+"""
+import smtplib
+import logging
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
+from typing import List, Optional, Union
+from pathlib import Path
+
+from config import SMTP_CONFIG, DEFAULT_SENDER, LOG_CONFIG
+
+# Setup logging
+logging.basicConfig(
+    level=getattr(logging, LOG_CONFIG["level"]),
+    format=LOG_CONFIG["format"]
+)
+logger = logging.getLogger(__name__)
+
+
+class EmailSender:
+    """
+    Core email sender class for sending emails via SMTP.
+    """
+    
+    def __init__(
+        self,
+        smtp_server: Optional[str] = None,
+        smtp_port: Optional[int] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        use_tls: bool = True
+    ):
+        """
+        Initialize EmailSender with SMTP configuration.
+        
+        Args:
+            smtp_server: SMTP server address
+            smtp_port: SMTP server port
+            username: SMTP username
+            password: SMTP password
+            use_tls: Whether to use TLS encryption
+        """
+        self.smtp_server = smtp_server or SMTP_CONFIG["server"]
+        self.smtp_port = smtp_port or SMTP_CONFIG["port"]
+        self.username = username or SMTP_CONFIG["username"]
+        self.password = password or SMTP_CONFIG["password"]
+        self.use_tls = use_tls if use_tls is not None else SMTP_CONFIG["use_tls"]
+        self._connection = None
+    
+    def connect(self) -> bool:
+        """
+        Establish connection to SMTP server.
+        
+        Returns:
+            bool: True if connection successful, False otherwise
+        """
+        try:
+            self._connection = smtplib.SMTP(self.smtp_server, self.smtp_port)
+            if self.use_tls:
+                self._connection.starttls()
+            if self.username and self.password:
+                self._connection.login(self.username, self.password)
+            logger.info(f"Connected to SMTP server: {self.smtp_server}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to connect to SMTP server: {e}")
+            return False
+    
+    def disconnect(self):
+        """Close SMTP connection."""
+        if self._connection:
+            try:
+                self._connection.quit()
+                logger.info("Disconnected from SMTP server")
+            except Exception as e:
+                logger.warning(f"Error disconnecting: {e}")
+            finally:
+                self._connection = None
+    
+    def send_email(
+        self,
+        to: Union[str, List[str]],
+        subject: str,
+        body: str,
+        from_addr: Optional[str] = None,
+        cc: Optional[Union[str, List[str]]] = None,
+        bcc: Optional[Union[str, List[str]]] = None,
+        html: bool = False,
+        attachments: Optional[List[str]] = None
+    ) -> bool:
+        """
+        Send an email.
+        
+        Args:
+            to: Recipient email address(es)
+            subject: Email subject
+            body: Email body content
+            from_addr: Sender email address
+            cc: CC recipient(s)
+            bcc: BCC recipient(s)
+            html: Whether body is HTML content
+            attachments: List of file paths to attach
+            
+        Returns:
+            bool: True if email sent successfully, False otherwise
+        """
+        try:
+            # Create message
+            msg = MIMEMultipart()
+            msg["From"] = from_addr or DEFAULT_SENDER
+            msg["To"] = to if isinstance(to, str) else ", ".join(to)
+            msg["Subject"] = subject
+            
+            if cc:
+                msg["Cc"] = cc if isinstance(cc, str) else ", ".join(cc)
+            
+            # Attach body
+            content_type = "html" if html else "plain"
+            msg.attach(MIMEText(body, content_type))
+            
+            # Attach files
+            if attachments:
+                for file_path in attachments:
+                    self._attach_file(msg, file_path)
+            
+            # Prepare recipients list
+            recipients = [to] if isinstance(to, str) else list(to)
+            if cc:
+                recipients.extend([cc] if isinstance(cc, str) else cc)
+            if bcc:
+                recipients.extend([bcc] if isinstance(bcc, str) else bcc)
+            
+            # Connect and send
+            if not self._connection:
+                self.connect()
+            
+            self._connection.sendmail(msg["From"], recipients, msg.as_string())
+            logger.info(f"Email sent successfully to: {to}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to send email: {e}")
+            return False
+    
+    def _attach_file(self, msg: MIMEMultipart, file_path: str):
+        """Attach a file to the email message."""
+        path = Path(file_path)
+        if not path.exists():
+            logger.warning(f"Attachment not found: {file_path}")
+            return
+        
+        with open(path, "rb") as f:
+            part = MIMEBase("application", "octet-stream")
+            part.set_payload(f.read())
+        
+        encoders.encode_base64(part)
+        part.add_header(
+            "Content-Disposition",
+            f"attachment; filename={path.name}"
+        )
+        msg.attach(part)
+        logger.debug(f"Attached file: {path.name}")
+    
+    def __enter__(self):
+        """Context manager entry."""
+        self.connect()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit."""
+        self.disconnect()
+
+
+def send_quick_email(
+    to: Union[str, List[str]],
+    subject: str,
+    body: str,
+    **kwargs
+) -> bool:
+    """
+    Quick function to send an email without managing connection.
+    
+    Args:
+        to: Recipient email address(es)
+        subject: Email subject
+        body: Email body content
+        **kwargs: Additional arguments passed to send_email
+        
+    Returns:
+        bool: True if email sent successfully
+    """
+    with EmailSender() as sender:
+        return sender.send_email(to, subject, body, **kwargs)
+
+
+if __name__ == "__main__":
+    # Example usage
+    print("Email Sender Module")
+    print("Use EmailSender class or send_quick_email function to send emails.")

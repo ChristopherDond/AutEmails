@@ -1,0 +1,20 @@
+# Email Automation System - Requirements
+# Python 3.8+ required
+
+# Core dependencies
+python-dotenv>=1.0.0
+
+# Optional: For HTML to PDF conversion (reports)
+# weasyprint>=60.0
+
+# Optional: For advanced scheduling
+# apscheduler>=3.10.0
+
+# Optional: For email validation
+# email-validator>=2.0.0
+
+# Development dependencies
+# pytest>=7.0.0
+# pytest-cov>=4.0.0
+# black>=23.0.0
+# flake8>=6.0.0
