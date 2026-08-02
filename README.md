@@ -1,3 +1,5 @@
+[Leia em Português (Brasil)](README-pt-br.md)
+
 # 📬 Email Automation System
 
 A comprehensive Python-based email automation system for sending reports, notifications, and scheduled emails automatically.
